@@ -1,0 +1,252 @@
+"""
+GPIB Instrument Module
+
+This module provides the GpibInstrument class for high-level
+communication with individual GPIB instruments.
+"""
+
+from typing import Optional, Union, List
+import time
+
+
+class GpibInstrument:
+    """
+    High-level interface for a single GPIB instrument.
+    
+    This class wraps communication with a specific GPIB instrument,
+    handling address management and providing convenient methods
+    for common operations.
+    
+    Args:
+        controller: PrologixGpib controller instance
+        address: Primary GPIB address (0-30)
+        sad: Secondary address (96-126), optional
+    """
+    
+    def __init__(self, controller, address: int, sad: Optional[int] = None):
+        """
+        Initialize the instrument interface.
+        
+        Args:
+            controller: PrologixGpib controller instance
+            address: Primary GPIB address (0-30)
+            sad: Secondary address (96-126), optional
+        """
+        self._controller = controller
+        self.address = address
+        self.sad = sad
+        
+        # Set the instrument's address on the controller
+        self._controller.set_address(address, sad)
+    
+    def write(self, command: str) -> None:
+        """
+        Send a command to the instrument.
+        
+        Args:
+            command: Command string without trailing newline
+        """
+        self._controller.write(command)
+    
+    def read(
+        self,
+        terminator: Union[str, int] = "eoi",
+        timeout: Optional[float] = None
+    ) -> str:
+        """
+        Read response from the instrument.
+        
+        Args:
+            terminator: 'eoi' for EOI detection, or ASCII value (0-255)
+            timeout: Override default timeout (optional)
+            
+        Returns:
+            Response string
+        """
+        return self._controller.read(terminator=terminator, timeout=timeout)
+    
+    def query(
+        self,
+        command: str,
+        terminator: Union[str, int] = "eoi",
+        timeout: Optional[float] = None
+    ) -> str:
+        """
+        Send a command and read response (convenience method).
+        
+        Args:
+            command: Command string without trailing newline
+            terminator: 'eoi' for EOI detection, or ASCII value (0-255)
+            timeout: Override default timeout (optional)
+            
+        Returns:
+            Response string
+        """
+        self._controller.write(command)
+        return self._controller.read(terminator=terminator, timeout=timeout)
+
+    def run(self, script) -> None:
+        """ 
+        Run a script of device commands.
+        
+        Commands starting with ! are run as python commands
+        """
+        for line in script.split('\n'):
+            line = line.split('#')[0].strip()
+            if line != '':
+                if line.startswith('!'):
+                    exec(line[1:])
+                else:
+                    self.write(line)
+    
+    def identify(self) -> str:
+        """
+        Query instrument identification.
+        
+        Sends *IDN? command and returns the response.
+        
+        Returns:
+            Instrument identification string
+        """
+        return self.query("*IDN?")
+    
+    def reset(self) -> None:
+        """Send reset command to the instrument."""
+        self.write("*RST")
+    
+    def status_query(self) -> int:
+        """
+        Query standard event status register.
+        
+        Returns:
+            Status register value
+        """
+        response = self.query("*ESR?")
+        return int(response.strip())
+    
+    def idn_match(self, pattern: str) -> bool:
+        """
+        Check if instrument identification matches a pattern.
+        
+        Args:
+            pattern: Pattern to match (supports * wildcards)
+            
+        Returns:
+            True if IDN matches the pattern
+        """
+        import fnmatch
+        
+        idn = self.identify()
+        return fnmatch.fnmatch(idn, pattern)
+    
+    def wait_for_srq(self, timeout: float = 10.0) -> bool:
+        """
+        Wait for SRQ (Service Request) from instrument.
+        
+        Args:
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            True if SRQ was received, False on timeout
+        """
+        start_time = time.time()
+        
+        while (time.time() - start_time) < timeout:
+            if self._controller.srq_status():
+                return True
+            time.sleep(0.1)
+        
+        return False
+    
+    def poll(self) -> int:
+        """
+        Perform serial poll on this instrument.
+        
+        Returns:
+            Serial poll response byte
+        """
+        return self._controller.serial_poll(self.address, self.sad)
+    
+    def trigger(self) -> None:
+        """Send Group Execute Trigger to this instrument."""
+        self._controller.group_trigger([self.address])
+    
+    def clear(self) -> None:
+        """Send Selected Device Clear (SDC) to this instrument."""
+        self._controller.clear()
+    
+    def local(self) -> None:
+        """Enable front panel operation of this instrument."""
+        self._controller.local_mode()
+    
+    def remote(self) -> None:
+        """Disable front panel operation of this instrument."""
+        self._controller.remote_mode()
+    
+    # Context manager support
+    def __enter__(self) -> 'GpibInstrument':
+        """Context manager entry."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit."""
+        pass
+    
+    # String representation
+    def __repr__(self) -> str:
+        if self.sad is not None:
+            return f"GpibInstrument(address={self.address}, sad={self.sad})"
+        return f"GpibInstrument(address={self.address})"
+
+
+class InstrumentList:
+    """
+    Container for multiple GPIB instruments.
+    
+    Provides convenient access to multiple instruments
+    through attribute or dictionary-style access.
+    
+    Args:
+        controller: PrologixGpib controller instance
+    """
+    
+    def __init__(self, controller):
+        self._controller = controller
+        self._instruments: dict = {}
+    
+    def add(self, name: str, address: int, sad: Optional[int] = None) -> GpibInstrument:
+        """
+        Add an instrument to the list.
+        
+        Args:
+            name: Name for this instrument (used in attribute access)
+            address: Primary GPIB address (0-30)
+            sad: Secondary address (96-126), optional
+            
+        Returns:
+            Created GpibInstrument instance
+        """
+        inst = self._controller.instrument(address, sad)
+        self._instruments[name] = inst
+        setattr(self, name, inst)
+        return inst
+    
+    def get(self, name: str) -> Optional[GpibInstrument]:
+        """Get instrument by name."""
+        return self._instruments.get(name)
+    
+    def __getitem__(self, key: str) -> GpibInstrument:
+        return self._instruments[key]
+    
+    def __setitem__(self, key: str, value: GpibInstrument) -> None:
+        self._instruments[key] = value
+        setattr(self, key, value)
+    
+    def __contains__(self, name: str) -> bool:
+        return name in self._instruments
+    
+    def __iter__(self):
+        return iter(self._instruments.values())
+    
+    def __len__(self) -> int:
+        return len(self._instruments)
